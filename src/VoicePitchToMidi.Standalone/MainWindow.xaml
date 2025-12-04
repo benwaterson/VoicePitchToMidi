@@ -1,0 +1,323 @@
+<Window x:Class="VoicePitchToMidi.Standalone.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VoicePitchToMidi.Standalone"
+        mc:Ignorable="d"
+        Title="Voice Pitch to MIDI"
+        Height="920" Width="480"
+        MinHeight="850" MinWidth="420"
+        Background="{StaticResource BackgroundBrush}"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.DataContext>
+        <local:MainViewModel/>
+    </Window.DataContext>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,24">
+            <TextBlock Text="VOICE PITCH TO MIDI"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{StaticResource PrimaryBrush}"/>
+            <TextBlock Text="Real-time pitch detection and MIDI conversion"
+                       FontSize="12" Margin="0,4,0,0"
+                       Foreground="{StaticResource TextSecondaryBrush}"/>
+        </StackPanel>
+
+        <!-- Main Pitch Display -->
+        <Border Grid.Row="1" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="28" Margin="0,0,0,16">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="20" ShadowDepth="0" Opacity="0.3"/>
+            </Border.Effect>
+            <StackPanel HorizontalAlignment="Center">
+                <TextBlock Text="NOTE" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondaryBrush}" HorizontalAlignment="Center"/>
+                <TextBlock Text="{Binding CurrentNoteName}"
+                           FontSize="64" FontWeight="Bold"
+                           Foreground="{StaticResource SuccessBrush}"
+                           HorizontalAlignment="Center" Margin="0,4,0,0">
+                    <TextBlock.Effect>
+                        <DropShadowEffect Color="{StaticResource SuccessColor}" BlurRadius="24" ShadowDepth="0" Opacity="0.4"/>
+                    </TextBlock.Effect>
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Secondary Stats -->
+        <Grid Grid.Row="2" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Frequency -->
+            <Border Grid.Column="0" Background="{StaticResource CardBrush}" CornerRadius="10" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="FREQUENCY" FontSize="9" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                    <TextBlock Text="{Binding CurrentFrequency, StringFormat={}{0:F1} Hz}"
+                               FontSize="18" FontWeight="SemiBold" Margin="0,6,0,0"
+                               Foreground="{StaticResource InfoBrush}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- MIDI Note -->
+            <Border Grid.Column="2" Background="{StaticResource CardBrush}" CornerRadius="10" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="MIDI NOTE" FontSize="9" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                    <TextBlock Text="{Binding CurrentMidiNote}"
+                               FontSize="18" FontWeight="SemiBold" Margin="0,6,0,0"
+                               Foreground="{StaticResource WarningBrush}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Confidence -->
+            <Border Grid.Column="4" Background="{StaticResource CardBrush}" CornerRadius="10" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="CONFIDENCE" FontSize="9" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                    <Grid Margin="0,6,0,0">
+                        <TextBlock Text="{Binding Confidence, StringFormat={}{0:P0}}"
+                                   FontSize="18" FontWeight="SemiBold"
+                                   Foreground="{StaticResource PrimaryBrush}"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- Device Selection -->
+        <Border Grid.Row="3" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="20" Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock Text="DEVICES" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,14"/>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Audio Backend" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding AudioBackends}" SelectedItem="{Binding SelectedAudioBackend}"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Audio Device" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding AudioDevices}" SelectedItem="{Binding SelectedAudioDevice}" DisplayMemberPath="Name"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="MIDI Output" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding MidiDevices}" SelectedItem="{Binding SelectedMidiDevice}" DisplayMemberPath="Name"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Algorithm" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding Algorithms}" SelectedItem="{Binding SelectedAlgorithm}"/>
+                </Grid>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Instrument" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding Instruments}" SelectedItem="{Binding SelectedInstrument}"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- Settings -->
+        <Border Grid.Row="4" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="20" Margin="0,0,0,16">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="PARAMETERS" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,14"/>
+
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <!-- Noise Gate -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="NOISE GATE" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding NoiseGate, StringFormat={}{0:F3}}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="0.1" Value="{Binding NoiseGate}" TickFrequency="0.01"/>
+                        </Grid>
+
+                        <!-- Min Confidence -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="MIN CONFIDENCE" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding MinConfidence, StringFormat={}{0:P0}}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="1" Value="{Binding MinConfidence}" TickFrequency="0.1"/>
+                        </Grid>
+
+                        <!-- Smoothing -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="SMOOTHING" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding Smoothing, StringFormat={}{0:P0}}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="1" Value="{Binding Smoothing}" TickFrequency="0.1"/>
+                        </Grid>
+
+                        <!-- Note Stability -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="NOTE STABILITY" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding NoteStability}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="1" Maximum="10" Value="{Binding NoteStability}" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                        </Grid>
+
+                        <!-- Min/Max Note -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="MIN NOTE" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding MinNoteName}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="127" Value="{Binding MinNote}" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="MAX NOTE" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding MaxNoteName}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="127" Value="{Binding MaxNote}" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                        </Grid>
+
+                        <!-- Pitch Bend -->
+                        <CheckBox Content="Send Pitch Bend" IsChecked="{Binding SendPitchBend}" Margin="0,0,0,14"/>
+
+                        <!-- Velocity Sensitivity -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="VELOCITY SENSITIVITY" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding VelocitySensitivity, StringFormat={}{0:P0}}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="0" Maximum="2" Value="{Binding VelocitySensitivity}" TickFrequency="0.1"/>
+                        </Grid>
+
+                        <!-- MIDI Channel -->
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="MIDI CHANNEL" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBlock Text="{Binding MidiChannel}" HorizontalAlignment="Right"
+                                           FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}"/>
+                            </Grid>
+                            <Slider Grid.Row="1" Minimum="1" Maximum="16" Value="{Binding MidiChannel}" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <!-- Confidence Bar -->
+        <Border Grid.Row="5" Background="{StaticResource CardBrush}" CornerRadius="10" Padding="16" Margin="0,0,0,16">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock Text="CONFIDENCE LEVEL" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                <Border Grid.Row="1" Background="#2A2A2A" CornerRadius="4" Height="8" Margin="0,8,0,0">
+                    <Border Background="{StaticResource PrimaryBrush}" CornerRadius="4" HorizontalAlignment="Left" Width="{Binding ConfidenceWidth}">
+                        <Border.Effect>
+                            <DropShadowEffect Color="{StaticResource PrimaryColor}" BlurRadius="8" ShadowDepth="0" Opacity="0.5"/>
+                        </Border.Effect>
+                    </Border>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- Controls -->
+        <Grid Grid.Row="6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0" Content="{Binding StartStopButtonText}"
+                    Command="{Binding StartStopCommand}"
+                    Style="{StaticResource PrimaryButton}"/>
+            <Button Grid.Column="2" Content="Reset"
+                    Command="{Binding ResetCommand}"
+                    Style="{StaticResource PrimaryButton}"
+                    Width="100"/>
+        </Grid>
+    </Grid>
+</Window>
