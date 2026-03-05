@@ -15,11 +15,13 @@ public sealed class PitchToMidiProcessor : IDisposable
     private readonly float[] _analysisBuffer;
     private readonly int _sampleRate;
     private readonly int _bufferSize;
+    private readonly int _hopSize;
 
     private MidiOutputHandler? _midiOutput;
     private VirtualMidiPort? _virtualMidiPort;
 
     private int _lastMidiNote = -1;
+    private int _candidateNote = -1;
     private int _noteHoldCounter;
     private int _silenceCounter;
     private float _smoothedFrequency;
@@ -38,10 +40,11 @@ public sealed class PitchToMidiProcessor : IDisposable
     public PitchAlgorithm CurrentAlgorithm => _currentAlgorithm;
 
     public PitchToMidiProcessor(int sampleRate = 44100, int bufferSize = 2048,
-        PitchAlgorithm algorithm = PitchAlgorithm.Yin)
+        PitchAlgorithm algorithm = PitchAlgorithm.Yin, int hopSize = 512)
     {
         _sampleRate = sampleRate;
         _bufferSize = bufferSize;
+        _hopSize = hopSize;
         _currentAlgorithm = algorithm;
 
         _pitchDetector = PitchDetectorFactory.Create(algorithm, sampleRate, bufferSize);
@@ -99,12 +102,14 @@ public sealed class PitchToMidiProcessor : IDisposable
         {
             _audioBuffer.Write(buffer.AsSpan(0, sampleCount));
 
-            // Process when we have enough samples
-            int requiredSamples = Settings.BufferSize;
-            while (_audioBuffer.Available >= requiredSamples)
+            // Process overlapping windows: peek a full window, then advance by hop size
+            int windowSize = Settings.BufferSize;
+            while (_audioBuffer.Available >= windowSize)
             {
-                _audioBuffer.Read(_analysisBuffer.AsSpan(0, requiredSamples));
-                var analysisBuffer = _analysisBuffer.AsSpan(0, requiredSamples);
+                _audioBuffer.Peek(_analysisBuffer.AsSpan(0, windowSize));
+                _audioBuffer.Advance(_hopSize);
+
+                var analysisBuffer = _analysisBuffer.AsSpan(0, windowSize);
 
                 // Check for silence (gate)
                 float rms = CalculateRms(analysisBuffer);
@@ -157,24 +162,37 @@ public sealed class PitchToMidiProcessor : IDisposable
         PitchDetected?.Invoke(this, new PitchEventArgs(result.Frequency, _smoothedFrequency, result.Confidence, midiNote));
 
         // Handle note changes with hysteresis
+        // Track which candidate note we're accumulating toward - reset if it changes
         if (midiNote != _lastMidiNote)
         {
-            _noteHoldCounter++;
+            if (midiNote != _candidateNote)
+            {
+                _candidateNote = midiNote;
+                _noteHoldCounter = 1;
+            }
+            else
+            {
+                _noteHoldCounter++;
+            }
 
             if (_noteHoldCounter >= Settings.NoteStability)
             {
                 TriggerNoteChange(midiNote, result.Confidence);
                 _noteHoldCounter = 0;
+                _candidateNote = -1;
             }
         }
         else
         {
             _noteHoldCounter = 0;
+            _candidateNote = -1;
 
             // Send pitch bend for micro-tuning if enabled
+            // Use smoothed frequency (not raw) so bend is relative to the actual note being played
             if (Settings.SendPitchBend && _lastMidiNote >= 0)
             {
-                float cents = result.MidiNoteCents;
+                float exactMidiNote = (float)(69.0 + 12.0 * Math.Log2(_smoothedFrequency / 440.0));
+                float cents = (exactMidiNote - _lastMidiNote) * 100f;
                 SendPitchBend(cents);
             }
         }
@@ -222,6 +240,7 @@ public sealed class PitchToMidiProcessor : IDisposable
 
             int oldNote = _lastMidiNote;
             _lastMidiNote = -1;
+            _candidateNote = -1;
             _smoothedFrequency = 0;
 
             MidiNoteChanged?.Invoke(this, new MidiNoteEventArgs(oldNote, -1, 0));
@@ -250,6 +269,7 @@ public sealed class PitchToMidiProcessor : IDisposable
             _audioBuffer.Clear();
             _pitchDetector.Reset();
             _lastMidiNote = -1;
+            _candidateNote = -1;
             _noteHoldCounter = 0;
             _silenceCounter = 0;
             _smoothedFrequency = 0;
@@ -274,10 +294,10 @@ public class ProcessorSettings
 {
     public int BufferSize { get; set; } = 2048;
     public float NoiseGate { get; set; } = 0.01f;
-    public float MinConfidence { get; set; } = 0.8f;
-    public float Smoothing { get; set; } = 0.3f;
-    public int NoteStability { get; set; } = 2;
-    public int SilenceThreshold { get; set; } = 5;
+    public float MinConfidence { get; set; } = 0.5f;
+    public float Smoothing { get; set; } = 0.6f;
+    public int NoteStability { get; set; } = 3;
+    public int SilenceThreshold { get; set; } = 20;
     public int MinNote { get; set; } = 36;  // C2
     public int MaxNote { get; set; } = 84;  // C6
     public bool SendPitchBend { get; set; } = true;
@@ -361,6 +381,36 @@ internal class RingBuffer
                 _readPos = (_readPos + 1) % _buffer.Length;
             }
             _available -= toRead;
+        }
+    }
+
+    /// <summary>
+    /// Copy samples without consuming them (non-destructive read).
+    /// </summary>
+    public void Peek(Span<float> destination)
+    {
+        lock (_lock)
+        {
+            int toPeek = Math.Min(destination.Length, _available);
+            int pos = _readPos;
+            for (int i = 0; i < toPeek; i++)
+            {
+                destination[i] = _buffer[pos];
+                pos = (pos + 1) % _buffer.Length;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Discard a number of samples from the read position (advance the window by hop size).
+    /// </summary>
+    public void Advance(int count)
+    {
+        lock (_lock)
+        {
+            int toAdvance = Math.Min(count, _available);
+            _readPos = (_readPos + toAdvance) % _buffer.Length;
+            _available -= toAdvance;
         }
     }
 

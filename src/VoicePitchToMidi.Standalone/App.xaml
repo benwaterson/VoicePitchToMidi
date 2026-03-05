@@ -4,6 +4,8 @@
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <ResourceDictionary>
+            <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+
             <!-- Modern Dark Theme Colors -->
             <Color x:Key="BackgroundColor">#0D0D0D</Color>
             <Color x:Key="SurfaceColor">#1A1A1A</Color>

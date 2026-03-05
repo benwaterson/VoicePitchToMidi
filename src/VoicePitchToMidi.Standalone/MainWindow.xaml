@@ -120,9 +120,15 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="Audio Device" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" FontSize="13"/>
                     <ComboBox Grid.Column="1" ItemsSource="{Binding AudioDevices}" SelectedItem="{Binding SelectedAudioDevice}" DisplayMemberPath="Name"/>
+                    <Button Grid.Column="2" Content="ASIO..."
+                            Command="{Binding OpenAsioControlPanelCommand}"
+                            Visibility="{Binding IsAsioSelected, Converter={StaticResource BoolToVisibility}}"
+                            Margin="8,0,0,0" Padding="10,4" FontSize="11"
+                            Style="{StaticResource PrimaryButton}"/>
                 </Grid>
 
                 <Grid Margin="0,0,0,10">

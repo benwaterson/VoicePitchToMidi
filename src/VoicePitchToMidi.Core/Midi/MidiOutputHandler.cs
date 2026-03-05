@@ -1,10 +1,10 @@
-using NAudio.Midi;
+using System.Runtime.InteropServices;
 
 namespace VoicePitchToMidi.Core.Midi;
 
 public sealed class MidiOutputHandler : IDisposable
 {
-    private readonly MidiOut _midiOut;
+    private nint _handle;
     private readonly int _channel;
     private int _currentNote = -1;
     private int _currentVelocity;
@@ -18,26 +18,43 @@ public sealed class MidiOutputHandler : IDisposable
 
     public MidiOutputHandler(int deviceIndex = 0, int channel = 0)
     {
-        if (deviceIndex >= MidiOut.NumberOfDevices)
+        int deviceCount = WinMM.midiOutGetNumDevs();
+        if (deviceIndex >= deviceCount)
         {
-            throw new ArgumentException($"MIDI device index {deviceIndex} not available. Only {MidiOut.NumberOfDevices} devices found.");
+            throw new ArgumentException($"MIDI device index {deviceIndex} not available. Only {deviceCount} devices found.");
         }
 
-        _midiOut = new MidiOut(deviceIndex);
+        // Open with CALLBACK_NULL (0) - no callback needed for output
+        int result = WinMM.midiOutOpen(out _handle, deviceIndex, IntPtr.Zero, IntPtr.Zero, 0);
+        if (result != 0)
+        {
+            throw new InvalidOperationException($"midiOutOpen failed with error code {result} (device {deviceIndex})");
+        }
+
         _channel = Math.Clamp(channel, 0, 15);
     }
 
     public static IReadOnlyList<MidiDeviceInfo> GetOutputDevices()
     {
         var devices = new List<MidiDeviceInfo>();
+        int count = WinMM.midiOutGetNumDevs();
 
-        for (int i = 0; i < MidiOut.NumberOfDevices; i++)
+        for (int i = 0; i < count; i++)
         {
-            var caps = MidiOut.DeviceInfo(i);
-            devices.Add(new MidiDeviceInfo(i, caps.ProductName, caps.Manufacturer.ToString()));
+            var caps = new WinMM.MIDIOUTCAPS();
+            if (WinMM.midiOutGetDevCaps((IntPtr)i, ref caps, Marshal.SizeOf<WinMM.MIDIOUTCAPS>()) == 0)
+            {
+                devices.Add(new MidiDeviceInfo(i, caps.szPname, $"MID={caps.wMid}"));
+            }
         }
 
         return devices;
+    }
+
+    private void SendShort(int message)
+    {
+        if (_disposed || _handle == 0) return;
+        WinMM.midiOutShortMsg(_handle, message);
     }
 
     public void NoteOn(int noteNumber, int velocity = 100)
@@ -61,12 +78,8 @@ public sealed class MidiOutputHandler : IDisposable
             _currentNote = noteNumber;
             _currentVelocity = velocity;
 
-            try
-            {
-                var noteOnEvent = new NoteOnEvent(0, _channel + 1, noteNumber, velocity, 0);
-                _midiOut.Send(noteOnEvent.GetAsShortMessage());
-            }
-            catch { /* Ignore errors during note on */ }
+            // Note On: 0x90 + channel | note << 8 | velocity << 16
+            SendShort((0x90 + _channel) | (noteNumber << 8) | (velocity << 16));
         }
     }
 
@@ -103,36 +116,20 @@ public sealed class MidiOutputHandler : IDisposable
         int msb = (pitchBendValue >> 7) & 0x7F;
 
         // Pitch bend message: 0xE0 + channel, LSB, MSB
-        int message = (0xE0 + _channel) | (lsb << 8) | (msb << 16);
-
-        try
-        {
-            _midiOut.Send(message);
-        }
-        catch { /* Ignore errors */ }
+        SendShort((0xE0 + _channel) | (lsb << 8) | (msb << 16));
     }
 
     public void ResetPitchBend()
     {
         if (_disposed) return;
 
-        // Center position
-        int lsb = 0x00;
-        int msb = 0x40; // 8192 >> 7 = 64 = 0x40
-
-        int message = (0xE0 + _channel) | (lsb << 8) | (msb << 16);
-
-        try
-        {
-            _midiOut.Send(message);
-        }
-        catch { /* Ignore errors */ }
+        // Center position: 8192 = 0x00 LSB, 0x40 MSB
+        SendShort((0xE0 + _channel) | (0x00 << 8) | (0x40 << 16));
     }
 
     /// <summary>
     /// Send a program change message to select an instrument.
     /// </summary>
-    /// <param name="program">Program number (0-127). See GeneralMidiProgram enum for standard GM instruments.</param>
     public void SendProgramChange(int program)
     {
         if (_disposed) return;
@@ -140,13 +137,8 @@ public sealed class MidiOutputHandler : IDisposable
         program = Math.Clamp(program, 0, 127);
         CurrentProgram = program;
 
-        try
-        {
-            // Program change: 0xC0 + channel, program
-            var programChange = new PatchChangeEvent(0, _channel + 1, program);
-            _midiOut.Send(programChange.GetAsShortMessage());
-        }
-        catch { /* Ignore errors */ }
+        // Program change: 0xC0 + channel | program << 8
+        SendShort((0xC0 + _channel) | (program << 8));
     }
 
     /// <summary>
@@ -159,12 +151,8 @@ public sealed class MidiOutputHandler : IDisposable
         controller = Math.Clamp(controller, 0, 127);
         value = Math.Clamp(value, 0, 127);
 
-        try
-        {
-            var ccMessage = new ControlChangeEvent(0, _channel + 1, (MidiController)controller, value);
-            _midiOut.Send(ccMessage.GetAsShortMessage());
-        }
-        catch { /* Ignore errors */ }
+        // CC: 0xB0 + channel | controller << 8 | value << 16
+        SendShort((0xB0 + _channel) | (controller << 8) | (value << 16));
     }
 
     public void AllNotesOff()
@@ -175,45 +163,25 @@ public sealed class MidiOutputHandler : IDisposable
         {
             if (_disposed) return;
 
-            try
+            // Send note off for current note
+            if (_currentNote >= 0)
             {
-                // Send note off for current note
-                if (_currentNote >= 0)
-                {
-                    SendNoteOffInternal(_currentNote);
-                    _currentNote = -1;
-                }
-
-                // Send All Notes Off CC (123)
-                var ccMessage = new ControlChangeEvent(0, _channel + 1, MidiController.AllNotesOff, 0);
-                _midiOut.Send(ccMessage.GetAsShortMessage());
-
-                ResetPitchBendInternal();
+                SendNoteOffInternal(_currentNote);
+                _currentNote = -1;
             }
-            catch { /* Ignore errors during cleanup */ }
+
+            // Send All Notes Off CC (123)
+            SendShort((0xB0 + _channel) | (123 << 8) | (0 << 16));
+
+            // Reset pitch bend
+            SendShort((0xE0 + _channel) | (0x00 << 8) | (0x40 << 16));
         }
     }
 
     private void SendNoteOffInternal(int noteNumber)
     {
-        try
-        {
-            var noteOffEvent = new NoteEvent(0, _channel + 1, MidiCommandCode.NoteOff, noteNumber, 0);
-            _midiOut.Send(noteOffEvent.GetAsShortMessage());
-        }
-        catch { /* Ignore errors */ }
-    }
-
-    private void ResetPitchBendInternal()
-    {
-        try
-        {
-            int lsb = 0x00;
-            int msb = 0x40;
-            int message = (0xE0 + _channel) | (lsb << 8) | (msb << 16);
-            _midiOut.Send(message);
-        }
-        catch { /* Ignore errors */ }
+        // Note Off: 0x80 + channel | note << 8 | 0 velocity << 16
+        SendShort((0x80 + _channel) | (noteNumber << 8));
     }
 
     public void Dispose()
@@ -224,26 +192,62 @@ public sealed class MidiOutputHandler : IDisposable
         {
             if (_disposed) return;
 
-            try
+            if (_currentNote >= 0)
             {
-                // Try to send note off before disposing
-                if (_currentNote >= 0)
-                {
-                    SendNoteOffInternal(_currentNote);
-                    _currentNote = -1;
-                }
+                SendNoteOffInternal(_currentNote);
+                _currentNote = -1;
             }
-            catch { /* Ignore */ }
 
             _disposed = true;
         }
 
-        try
+        if (_handle != 0)
         {
-            _midiOut.Dispose();
+            WinMM.midiOutReset(_handle);
+            WinMM.midiOutClose(_handle);
+            _handle = 0;
         }
-        catch { /* Ignore errors during dispose */ }
     }
 }
 
 public record MidiDeviceInfo(int Index, string Name, string Manufacturer);
+
+/// <summary>
+/// Direct Win32 MIDI output P/Invoke - avoids NAudio's CALLBACK_FUNCTION
+/// marshaling issues on newer .NET runtimes.
+/// </summary>
+internal static partial class WinMM
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    internal struct MIDIOUTCAPS
+    {
+        public ushort wMid;
+        public ushort wPid;
+        public uint vDriverVersion;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szPname;
+        public ushort wTechnology;
+        public ushort wVoices;
+        public ushort wNotes;
+        public ushort wChannelMask;
+        public uint dwSupport;
+    }
+
+    [LibraryImport("winmm.dll")]
+    internal static partial int midiOutGetNumDevs();
+
+    [DllImport("winmm.dll", EntryPoint = "midiOutGetDevCapsW", CharSet = CharSet.Auto)]
+    internal static extern int midiOutGetDevCaps(IntPtr uDeviceID, ref MIDIOUTCAPS lpMidiOutCaps, int cbMidiOutCaps);
+
+    [LibraryImport("winmm.dll")]
+    internal static partial int midiOutOpen(out nint lphmo, int uDeviceID, IntPtr dwCallback, IntPtr dwCallbackInstance, int dwFlags);
+
+    [LibraryImport("winmm.dll")]
+    internal static partial int midiOutClose(nint hmo);
+
+    [LibraryImport("winmm.dll")]
+    internal static partial int midiOutShortMsg(nint hmo, int dwMsg);
+
+    [LibraryImport("winmm.dll")]
+    internal static partial int midiOutReset(nint hmo);
+}

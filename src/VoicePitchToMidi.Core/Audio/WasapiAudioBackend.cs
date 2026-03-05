@@ -23,18 +23,27 @@ public sealed class WasapiAudioBackend : IAudioBackend
     public WasapiAudioBackend(string? deviceId = null, int sampleRate = 44100, int bufferSize = 2048,
         bool exclusiveMode = false)
     {
-        _targetSampleRate = sampleRate;
         _bufferSize = bufferSize;
-        _targetFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
 
         var device = GetDevice(deviceId);
         DeviceName = device.FriendlyName;
 
-        var shareMode = exclusiveMode ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
-        _capture = new WasapiCapture(device, exclusiveMode, 10); // 10ms latency
-        _capture.WaveFormat = _capture.WaveFormat.SampleRate == sampleRate
-            ? WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1)
-            : _capture.WaveFormat;
+        // Exclusive mode: lower latency (bypasses Windows audio engine), can set format
+        // Shared mode: uses system mix format, higher latency but always works
+        int latencyMs = exclusiveMode ? 5 : 10;
+        _capture = new WasapiCapture(device, exclusiveMode, latencyMs);
+
+        if (exclusiveMode)
+        {
+            // In exclusive mode we can request a specific format
+            // Use the device's native sample rate with mono float
+            int nativeRate = device.AudioClient.MixFormat.SampleRate;
+            _capture.WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(nativeRate, 1);
+        }
+
+        // Use the actual format the capture is configured with
+        _targetSampleRate = _capture.WaveFormat.SampleRate;
+        _targetFormat = WaveFormat.CreateIeeeFloatWaveFormat(_targetSampleRate, 1);
 
         _capture.DataAvailable += OnDataAvailable;
         _capture.RecordingStopped += OnRecordingStopped;

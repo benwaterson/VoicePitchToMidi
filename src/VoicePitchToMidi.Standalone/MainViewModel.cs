@@ -20,7 +20,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     // Device Lists
     [ObservableProperty]
-    private ObservableCollection<string> _audioBackends = ["WASAPI", "ASIO"];
+    private ObservableCollection<string> _audioBackends = ["WASAPI", "WASAPI (Exclusive)", "ASIO"];
 
     [ObservableProperty]
     private string _selectedAudioBackend = "WASAPI";
@@ -80,13 +80,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private float _noiseGate = 0.01f;
 
     [ObservableProperty]
-    private float _minConfidence = 0.8f;
+    private float _minConfidence = 0.5f;
 
     [ObservableProperty]
-    private float _smoothing = 0.3f;
+    private float _smoothing = 0.6f;
 
     [ObservableProperty]
-    private int _noteStability = 2;
+    private int _noteStability = 3;
 
     [ObservableProperty]
     private int _minNote = 36;
@@ -105,6 +105,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     public string MinNoteName => PitchResult.MidiNoteToName(MinNote);
     public string MaxNoteName => PitchResult.MidiNoteToName(MaxNote);
+    public bool IsAsioSelected => SelectedAudioBackend == "ASIO";
+    private bool IsWasapiBackend => SelectedAudioBackend is "WASAPI" or "WASAPI (Exclusive)";
 
     public MainViewModel()
     {
@@ -218,20 +220,27 @@ public partial class MainViewModel : ObservableObject, IDisposable
     partial void OnSelectedAudioBackendChanged(string value)
     {
         RefreshAudioDevices();
+        OnPropertyChanged(nameof(IsAsioSelected));
         SaveSettings();
     }
 
     partial void OnSelectedAudioDeviceChanged(AudioDeviceInfo? value) => SaveSettings();
     partial void OnSelectedMidiDeviceChanged(MidiDeviceInfo? value) => SaveSettings();
-    partial void OnMinNoteChanged(int value) { OnPropertyChanged(nameof(MinNoteName)); SaveSettings(); }
-    partial void OnMaxNoteChanged(int value) { OnPropertyChanged(nameof(MaxNoteName)); SaveSettings(); }
-    partial void OnNoiseGateChanged(float value) => SaveSettings();
-    partial void OnMinConfidenceChanged(float value) => SaveSettings();
-    partial void OnSmoothingChanged(float value) => SaveSettings();
-    partial void OnNoteStabilityChanged(int value) => SaveSettings();
-    partial void OnSendPitchBendChanged(bool value) => SaveSettings();
-    partial void OnVelocitySensitivityChanged(float value) => SaveSettings();
-    partial void OnMidiChannelChanged(int value) => SaveSettings();
+    partial void OnMinNoteChanged(int value) { OnPropertyChanged(nameof(MinNoteName)); ApplyAndSave(); }
+    partial void OnMaxNoteChanged(int value) { OnPropertyChanged(nameof(MaxNoteName)); ApplyAndSave(); }
+    partial void OnNoiseGateChanged(float value) => ApplyAndSave();
+    partial void OnMinConfidenceChanged(float value) => ApplyAndSave();
+    partial void OnSmoothingChanged(float value) => ApplyAndSave();
+    partial void OnNoteStabilityChanged(int value) => ApplyAndSave();
+    partial void OnSendPitchBendChanged(bool value) => ApplyAndSave();
+    partial void OnVelocitySensitivityChanged(float value) => ApplyAndSave();
+    partial void OnMidiChannelChanged(int value) => ApplyAndSave();
+
+    private void ApplyAndSave()
+    {
+        ApplySettings();
+        SaveSettings();
+    }
 
     partial void OnSelectedAlgorithmChanged(AlgorithmOption? value)
     {
@@ -263,7 +272,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            var devices = SelectedAudioBackend == "WASAPI"
+            var devices = IsWasapiBackend
                 ? WasapiAudioBackend.GetDevices()
                 : AsioAudioBackend.GetDevices();
 
@@ -332,28 +341,47 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            int sampleRate = 44100;
+            // Open MIDI output BEFORE audio backend - ASIO drivers take exclusive device
+            // access which can block MIDI ports on the same hardware
+            if (SelectedMidiDevice != null)
+            {
+                try
+                {
+                    _midiOutput = new MidiOutputHandler(SelectedMidiDevice.Index, MidiChannel - 1);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        $"Could not open MIDI device \"{SelectedMidiDevice.Name}\": {ex.Message}\n\n" +
+                        "Pitch detection will still work, but no MIDI output will be sent. " +
+                        "Make sure the device isn't already in use by another application.",
+                        "MIDI Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    _midiOutput = null;
+                }
+            }
+
             int bufferSize = 2048;
 
-            if (SelectedAudioBackend == "WASAPI")
+            if (IsWasapiBackend)
             {
-                _audioBackend = new WasapiAudioBackend(SelectedAudioDevice.Id, sampleRate, bufferSize);
+                bool exclusive = SelectedAudioBackend == "WASAPI (Exclusive)";
+                _audioBackend = new WasapiAudioBackend(SelectedAudioDevice.Id, bufferSize: bufferSize, exclusiveMode: exclusive);
             }
             else
             {
                 _audioBackend = new AsioAudioBackend(SelectedAudioDevice.Id, 0, bufferSize);
-                sampleRate = _audioBackend.SampleRate;
             }
+
+            // Use the actual sample rate from the audio backend
+            int sampleRate = _audioBackend.SampleRate;
 
             // Create processor with selected algorithm
             var algorithm = SelectedAlgorithm?.Algorithm ?? PitchAlgorithm.Yin;
             _processor = new PitchToMidiProcessor(sampleRate, bufferSize, algorithm);
             ApplySettings();
 
-            // Create MIDI output
-            if (SelectedMidiDevice != null)
+            if (_midiOutput != null)
             {
-                _midiOutput = new MidiOutputHandler(SelectedMidiDevice.Index, MidiChannel - 1);
                 _processor.SetMidiOutput(_midiOutput);
 
                 // Send program change for selected instrument
@@ -384,7 +412,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private void Stop()
     {
-        // Disconnect events first
+        // Disconnect events first to stop new callbacks
         if (_audioBackend != null)
         {
             _audioBackend.AudioDataAvailable -= OnAudioDataAvailable;
@@ -397,18 +425,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
             _processor.MidiNoteChanged -= OnMidiNoteChanged;
         }
 
-        // Stop and dispose in order
+        // Stop audio capture first so no more callbacks arrive
         _audioBackend?.Stop();
+        _audioBackend?.Dispose();
+        _audioBackend = null;
 
-        // Dispose MIDI first (while processor might still reference it)
-        _midiOutput?.Dispose();
-        _midiOutput = null;
-
+        // Now safe to dispose processor (sends final note-off via MIDI)
         _processor?.Dispose();
         _processor = null;
 
-        _audioBackend?.Dispose();
-        _audioBackend = null;
+        // Dispose MIDI last since processor may use it during dispose
+        _midiOutput?.Dispose();
+        _midiOutput = null;
 
         _isRunning = false;
         StartStopButtonText = "Start";
@@ -418,6 +446,36 @@ public partial class MainViewModel : ObservableObject, IDisposable
         CurrentFrequency = 0;
         Confidence = 0;
         ConfidenceWidth = 0;
+    }
+
+    [RelayCommand]
+    private void OpenAsioControlPanel()
+    {
+        if (SelectedAudioDevice == null)
+        {
+            MessageBox.Show("Please select an ASIO device first.", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            if (_audioBackend is AsioAudioBackend asioBackend)
+            {
+                asioBackend.ShowControlPanel();
+            }
+            else
+            {
+                // Open a temporary AsioOut just to show the control panel - no Init needed
+                using var tempAsio = new NAudio.Wave.AsioOut(SelectedAudioDevice.Id);
+                tempAsio.ShowControlPanel();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error opening ASIO control panel: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     [RelayCommand]
