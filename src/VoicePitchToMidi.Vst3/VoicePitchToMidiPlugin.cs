@@ -167,6 +167,7 @@ public class VoicePitchToMidiPlugin : AudioPluginWPF
         _processor.MidiNoteChanged += OnMidiNoteChanged;
 
         ApplySettings();
+        _processor.Start();
     }
 
     public override void Stop()

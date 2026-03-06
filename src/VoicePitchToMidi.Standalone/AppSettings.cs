@@ -37,6 +37,7 @@ public class AppSettings
     public bool SendPitchBend { get; set; } = true;
     public float VelocitySensitivity { get; set; } = 1.0f;
     public int MidiChannel { get; set; } = 1;
+    public bool PercussiveMode { get; set; }
 
     /// <summary>
     /// Load settings from disk, or return defaults if not found.

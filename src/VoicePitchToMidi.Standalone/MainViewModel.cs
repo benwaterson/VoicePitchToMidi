@@ -75,6 +75,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _startStopButtonText = "Start";
 
+    [ObservableProperty]
+    private float[] _spectrumBins = new float[129];
+
     // Settings
     [ObservableProperty]
     private float _noiseGate = 0.01f;
@@ -102,6 +105,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private int _midiChannel = 1;
+
+    [ObservableProperty]
+    private bool _percussiveMode;
 
     public string MinNoteName => PitchResult.MidiNoteToName(MinNote);
     public string MaxNoteName => PitchResult.MidiNoteToName(MaxNote);
@@ -185,6 +191,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             SendPitchBend = settings.SendPitchBend;
             VelocitySensitivity = settings.VelocitySensitivity;
             MidiChannel = settings.MidiChannel;
+            PercussiveMode = settings.PercussiveMode;
         }
         finally
         {
@@ -211,7 +218,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
             MaxNote = MaxNote,
             SendPitchBend = SendPitchBend,
             VelocitySensitivity = VelocitySensitivity,
-            MidiChannel = MidiChannel
+            MidiChannel = MidiChannel,
+            PercussiveMode = PercussiveMode
         };
 
         settings.Save();
@@ -235,6 +243,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     partial void OnSendPitchBendChanged(bool value) => ApplyAndSave();
     partial void OnVelocitySensitivityChanged(float value) => ApplyAndSave();
     partial void OnMidiChannelChanged(int value) => ApplyAndSave();
+    partial void OnPercussiveModeChanged(bool value) => ApplyAndSave();
 
     private void ApplyAndSave()
     {
@@ -396,8 +405,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             _audioBackend.Error += OnAudioError;
             _processor.PitchDetected += OnPitchDetected;
             _processor.MidiNoteChanged += OnMidiNoteChanged;
+            _processor.SpectrumUpdated += OnSpectrumUpdated;
 
-            // Start
+            // Start processing thread, then audio
+            _processor.Start();
             _audioBackend.Start();
             _isRunning = true;
             StartStopButtonText = "Stop";
@@ -423,6 +434,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         {
             _processor.PitchDetected -= OnPitchDetected;
             _processor.MidiNoteChanged -= OnMidiNoteChanged;
+            _processor.SpectrumUpdated -= OnSpectrumUpdated;
         }
 
         // Stop audio capture first so no more callbacks arrive
@@ -446,6 +458,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         CurrentFrequency = 0;
         Confidence = 0;
         ConfidenceWidth = 0;
+        SpectrumBins = new float[129];
     }
 
     [RelayCommand]
@@ -503,7 +516,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
             MaxNote = MaxNote,
             SendPitchBend = SendPitchBend,
             VelocitySensitivity = VelocitySensitivity,
-            MidiChannel = MidiChannel - 1
+            MidiChannel = MidiChannel - 1,
+            PercussiveMode = PercussiveMode
         };
     }
 
@@ -514,7 +528,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private void OnAudioError(object? sender, string error)
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        Application.Current.Dispatcher.BeginInvoke(() =>
         {
             MessageBox.Show($"Audio error: {error}", "Error",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -523,7 +537,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private void OnPitchDetected(object? sender, PitchEventArgs e)
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        Application.Current.Dispatcher.BeginInvoke(() =>
         {
             CurrentFrequency = e.SmoothedFrequency;
             CurrentNoteName = PitchResult.MidiNoteToName(e.MidiNote);
@@ -533,11 +547,19 @@ public partial class MainViewModel : ObservableObject, IDisposable
         });
     }
 
+    private void OnSpectrumUpdated(object? sender, SpectrumEventArgs e)
+    {
+        Application.Current.Dispatcher.BeginInvoke(() =>
+        {
+            SpectrumBins = e.Bins;
+        });
+    }
+
     private void OnMidiNoteChanged(object? sender, MidiNoteEventArgs e)
     {
         if (e.CurrentNote < 0)
         {
-            Application.Current.Dispatcher.Invoke(() =>
+            Application.Current.Dispatcher.BeginInvoke(() =>
             {
                 CurrentNoteName = "---";
                 CurrentMidiNote = "---";

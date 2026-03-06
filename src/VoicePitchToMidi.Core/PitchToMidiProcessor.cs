@@ -1,3 +1,4 @@
+using System.Threading;
 using VoicePitchToMidi.Core.Audio;
 using VoicePitchToMidi.Core.Midi;
 using VoicePitchToMidi.Core.PitchDetection;
@@ -6,16 +7,31 @@ namespace VoicePitchToMidi.Core;
 
 /// <summary>
 /// Main processor that connects audio input, pitch detection, and MIDI output.
+/// Audio callback writes to a lock-free SPSC buffer; a dedicated background thread
+/// runs pitch detection and onset analysis without blocking the audio path.
 /// </summary>
 public sealed class PitchToMidiProcessor : IDisposable
 {
     private IPitchDetector _pitchDetector;
-    private readonly RingBuffer _audioBuffer;
-    private readonly object _lock = new();
+    private readonly SpscRingBuffer _audioBuffer;
     private readonly float[] _analysisBuffer;
     private readonly int _sampleRate;
     private readonly int _bufferSize;
     private readonly int _hopSize;
+
+    // Dedicated processing thread
+    private Thread? _processingThread;
+    private readonly ManualResetEventSlim _dataReady = new(false);
+    private volatile bool _running;
+
+    // Onset detection
+    private readonly OnsetDetector _onsetDetector = new();
+    private readonly float[] _onsetBuffer = new float[256];
+    private bool _pendingOnset;
+    private int _onsetAge; // hops since onset was detected
+    private float _onsetRms; // RMS at onset time, used for velocity
+    private const int OnsetExpiryHops = 3;
+    private const int OnsetSmoothingHops = 4; // hops of reduced smoothing after onset
 
     private MidiOutputHandler? _midiOutput;
     private VirtualMidiPort? _virtualMidiPort;
@@ -28,13 +44,20 @@ public sealed class PitchToMidiProcessor : IDisposable
     private bool _disposed;
     private PitchAlgorithm _currentAlgorithm = PitchAlgorithm.Yin;
 
+    // Spectrum visualization
+    private readonly float[] _spectrumBins = new float[129]; // HalfFft + 1
+    private readonly float[] _zeroBins = new float[129];
+    private long _lastSpectrumTicks;
+
     public event EventHandler<PitchEventArgs>? PitchDetected;
     public event EventHandler<MidiNoteEventArgs>? MidiNoteChanged;
+    public event EventHandler<SpectrumEventArgs>? SpectrumUpdated;
 
-    // Configuration
+    // Configuration — read by processing thread, written by UI thread.
+    // ProcessorSettings is a class; the reference swap is atomic on .NET.
     public ProcessorSettings Settings { get; set; } = new();
 
-    public bool IsProcessing { get; private set; }
+    public bool IsProcessing => _running;
     public float CurrentFrequency => _smoothedFrequency;
     public int CurrentMidiNote => _lastMidiNote;
     public PitchAlgorithm CurrentAlgorithm => _currentAlgorithm;
@@ -48,22 +71,48 @@ public sealed class PitchToMidiProcessor : IDisposable
         _currentAlgorithm = algorithm;
 
         _pitchDetector = PitchDetectorFactory.Create(algorithm, sampleRate, bufferSize);
-        _audioBuffer = new RingBuffer(bufferSize * 4);
+        _audioBuffer = new SpscRingBuffer(bufferSize * 4);
         _analysisBuffer = new float[bufferSize];
     }
 
     /// <summary>
+    /// Start the background processing thread.
+    /// </summary>
+    public void Start()
+    {
+        if (_running) return;
+        _running = true;
+        _processingThread = new Thread(ProcessingLoop)
+        {
+            Name = "PitchProcessor",
+            IsBackground = true,
+            Priority = ThreadPriority.AboveNormal
+        };
+        _processingThread.Start();
+    }
+
+    /// <summary>
+    /// Stop the background processing thread and wait for it to exit.
+    /// </summary>
+    public void Stop()
+    {
+        _running = false;
+        _dataReady.Set(); // wake the thread so it can exit
+        _processingThread?.Join(timeout: TimeSpan.FromSeconds(2));
+        _processingThread = null;
+    }
+
+    /// <summary>
     /// Switch to a different pitch detection algorithm.
+    /// Uses Interlocked.Exchange for atomic reference swap.
     /// </summary>
     public void SetAlgorithm(PitchAlgorithm algorithm)
     {
         if (algorithm == _currentAlgorithm) return;
 
-        lock (_lock)
-        {
-            _currentAlgorithm = algorithm;
-            _pitchDetector = PitchDetectorFactory.Create(algorithm, _sampleRate, _bufferSize);
-        }
+        _currentAlgorithm = algorithm;
+        var newDetector = PitchDetectorFactory.Create(algorithm, _sampleRate, _bufferSize);
+        Interlocked.Exchange(ref _pitchDetector, newDetector);
     }
 
     /// <summary>
@@ -94,49 +143,151 @@ public sealed class PitchToMidiProcessor : IDisposable
         _virtualMidiPort = port;
     }
 
+    /// <summary>
+    /// Called from the audio callback thread. Writes samples to the lock-free buffer
+    /// and signals the processing thread. Returns in microseconds.
+    /// </summary>
     public void ProcessAudioData(float[] buffer, int sampleCount)
     {
         if (_disposed) return;
 
-        lock (_lock)
-        {
-            _audioBuffer.Write(buffer.AsSpan(0, sampleCount));
+        _audioBuffer.Write(buffer.AsSpan(0, sampleCount));
+        _dataReady.Set();
+    }
 
-            // Process overlapping windows: peek a full window, then advance by hop size
-            int windowSize = Settings.BufferSize;
-            while (_audioBuffer.Available >= windowSize)
+    /// <summary>
+    /// Background processing loop. Waits for audio data, then runs onset detection
+    /// and pitch analysis in overlapping windows.
+    /// </summary>
+    private void ProcessingLoop()
+    {
+        while (_running)
+        {
+            _dataReady.Wait();
+            _dataReady.Reset();
+
+            if (!_running) break;
+
+            var settings = Settings; // snapshot reference once per wake-up
+            int windowSize = settings.BufferSize;
+
+            while (_audioBuffer.Available >= windowSize && _running)
             {
                 _audioBuffer.Peek(_analysisBuffer.AsSpan(0, windowSize));
                 _audioBuffer.Advance(_hopSize);
 
-                var analysisBuffer = _analysisBuffer.AsSpan(0, windowSize);
+                var analysisSpan = _analysisBuffer.AsSpan(0, windowSize);
 
-                // Check for silence (gate)
-                float rms = CalculateRms(analysisBuffer);
-                if (rms < Settings.NoiseGate)
+                // RMS noise gate
+                float rms = CalculateRms(analysisSpan);
+                if (rms < settings.NoiseGate)
                 {
-                    HandleSilence();
+                    RaiseSpectrumIfDue(true);
+                    HandleSilence(settings);
                     continue;
                 }
 
-                // Detect pitch
-                var result = _pitchDetector.DetectPitch(analysisBuffer);
+                // 1. Onset detection on last 256 samples of the window
+                int onsetStart = Math.Max(0, windowSize - 256);
+                int onsetLen = Math.Min(256, windowSize);
+                analysisSpan.Slice(onsetStart, onsetLen).CopyTo(_onsetBuffer.AsSpan(0, onsetLen));
 
-                if (result.HasPitch && result.Confidence >= Settings.MinConfidence)
+                float onsetStrength = _onsetDetector.Detect(
+                    _onsetBuffer.AsSpan(0, onsetLen), out float detectedRms);
+
+                RaiseSpectrumIfDue(false);
+
+                if (onsetStrength > 0 && !_pendingOnset)
                 {
-                    ProcessPitchResult(result);
+                    _pendingOnset = true;
+                    _onsetAge = 0;
+                    _onsetRms = detectedRms;
+                }
+
+                if (_pendingOnset)
+                    _onsetAge++;
+
+                // 2. Pitch detection on full window
+                var detector = _pitchDetector; // read reference once
+                var result = detector.DetectPitch(analysisSpan);
+
+                // 3. Two-phase note triggering
+                if (result.HasPitch && result.Confidence >= settings.MinConfidence)
+                {
+                    if (_pendingOnset && _onsetAge <= OnsetExpiryHops)
+                    {
+                        // Onset + pitch: trigger immediately, skip hysteresis
+                        ProcessPitchResultImmediate(result, settings);
+                        _pendingOnset = false;
+                    }
+                    else
+                    {
+                        // Normal tonal path with smoothing + hysteresis
+                        ProcessPitchResult(result, settings);
+                    }
                 }
                 else
                 {
-                    HandleSilence();
+                    // No pitch detected
+                    if (_pendingOnset && _onsetAge <= OnsetExpiryHops)
+                    {
+                        // Transient still decaying — wait for pitch to resolve
+                    }
+                    else
+                    {
+                        if (_pendingOnset)
+                            _pendingOnset = false; // expired false alarm
+
+                        HandleSilence(settings);
+                    }
                 }
             }
         }
     }
 
-    private void ProcessPitchResult(PitchResult result)
+    /// <summary>
+    /// Immediate onset-triggered note: bypasses hysteresis, uses onset RMS for velocity.
+    /// </summary>
+    private void ProcessPitchResultImmediate(PitchResult result, ProcessorSettings settings)
     {
         _silenceCounter = 0;
+
+        // Adaptive smoothing: during onset, use minimal smoothing for fast tracking
+        _smoothedFrequency = result.Frequency;
+
+        int midiNote = FrequencyToMidiNote(_smoothedFrequency);
+        if (midiNote < settings.MinNote || midiNote > settings.MaxNote)
+        {
+            HandleSilence(settings);
+            return;
+        }
+
+        PitchDetected?.Invoke(this, new PitchEventArgs(
+            result.Frequency, _smoothedFrequency, result.Confidence, midiNote));
+
+        if (midiNote != _lastMidiNote)
+        {
+            // Use onset RMS for velocity instead of confidence
+            float velocityBase = Math.Max(_onsetRms * 8f, result.Confidence);
+            TriggerNoteChange(midiNote, velocityBase, settings);
+        }
+
+        _noteHoldCounter = 0;
+        _candidateNote = -1;
+    }
+
+    private void ProcessPitchResult(PitchResult result, ProcessorSettings settings)
+    {
+        _silenceCounter = 0;
+
+        // Adaptive smoothing: reduced smoothing shortly after onset
+        float smoothingFactor = settings.Smoothing;
+        if (_onsetAge > 0 && _onsetAge <= OnsetSmoothingHops)
+        {
+            // Blend toward 1.0 (no smoothing) during onset settling
+            float onsetWeight = 1f - (_onsetAge / (float)OnsetSmoothingHops);
+            smoothingFactor = smoothingFactor + (1f - smoothingFactor) * onsetWeight;
+        }
 
         // Smooth frequency
         if (_smoothedFrequency <= 0)
@@ -145,16 +296,16 @@ public sealed class PitchToMidiProcessor : IDisposable
         }
         else
         {
-            _smoothedFrequency = _smoothedFrequency * (1 - Settings.Smoothing) + result.Frequency * Settings.Smoothing;
+            _smoothedFrequency = _smoothedFrequency * (1 - smoothingFactor) + result.Frequency * smoothingFactor;
         }
 
         // Get MIDI note
         int midiNote = FrequencyToMidiNote(_smoothedFrequency);
 
         // Apply note range filter
-        if (midiNote < Settings.MinNote || midiNote > Settings.MaxNote)
+        if (midiNote < settings.MinNote || midiNote > settings.MaxNote)
         {
-            HandleSilence();
+            HandleSilence(settings);
             return;
         }
 
@@ -162,7 +313,6 @@ public sealed class PitchToMidiProcessor : IDisposable
         PitchDetected?.Invoke(this, new PitchEventArgs(result.Frequency, _smoothedFrequency, result.Confidence, midiNote));
 
         // Handle note changes with hysteresis
-        // Track which candidate note we're accumulating toward - reset if it changes
         if (midiNote != _lastMidiNote)
         {
             if (midiNote != _candidateNote)
@@ -175,9 +325,9 @@ public sealed class PitchToMidiProcessor : IDisposable
                 _noteHoldCounter++;
             }
 
-            if (_noteHoldCounter >= Settings.NoteStability)
+            if (_noteHoldCounter >= settings.NoteStability)
             {
-                TriggerNoteChange(midiNote, result.Confidence);
+                TriggerNoteChange(midiNote, result.Confidence, settings);
                 _noteHoldCounter = 0;
                 _candidateNote = -1;
             }
@@ -188,32 +338,31 @@ public sealed class PitchToMidiProcessor : IDisposable
             _candidateNote = -1;
 
             // Send pitch bend for micro-tuning if enabled
-            // Use smoothed frequency (not raw) so bend is relative to the actual note being played
-            if (Settings.SendPitchBend && _lastMidiNote >= 0)
+            if (settings.SendPitchBend && _lastMidiNote >= 0)
             {
                 float exactMidiNote = (float)(69.0 + 12.0 * Math.Log2(_smoothedFrequency / 440.0));
                 float cents = (exactMidiNote - _lastMidiNote) * 100f;
-                SendPitchBend(cents);
+                SendPitchBend(cents, settings);
             }
         }
     }
 
-    private void TriggerNoteChange(int newNote, float confidence)
+    private void TriggerNoteChange(int newNote, float confidence, ProcessorSettings settings)
     {
         int oldNote = _lastMidiNote;
         _lastMidiNote = newNote;
 
-        int velocity = (int)(confidence * 127 * Settings.VelocitySensitivity);
+        int velocity = (int)(confidence * 127 * settings.VelocitySensitivity);
         velocity = Math.Clamp(velocity, 1, 127);
 
         // Send MIDI
         _midiOutput?.NoteOn(newNote, velocity);
-        _virtualMidiPort?.SendNoteOn(Settings.MidiChannel, newNote, velocity);
+        _virtualMidiPort?.SendNoteOn(settings.MidiChannel, newNote, velocity);
 
         MidiNoteChanged?.Invoke(this, new MidiNoteEventArgs(oldNote, newNote, velocity));
     }
 
-    private void SendPitchBend(float cents)
+    private void SendPitchBend(float cents, ProcessorSettings settings)
     {
         _midiOutput?.SendPitchBend(cents);
 
@@ -223,20 +372,22 @@ public sealed class PitchToMidiProcessor : IDisposable
             float normalized = (semitones / 2f) + 0.5f;
             normalized = Math.Clamp(normalized, 0f, 1f);
             int pitchBendValue = (int)(normalized * 16383);
-            _virtualMidiPort.SendPitchBend(Settings.MidiChannel, pitchBendValue);
+            _virtualMidiPort.SendPitchBend(settings.MidiChannel, pitchBendValue);
         }
     }
 
-    private void HandleSilence()
+    private void HandleSilence(ProcessorSettings settings)
     {
         _silenceCounter++;
         _noteHoldCounter = 0;
 
-        if (_silenceCounter >= Settings.SilenceThreshold && _lastMidiNote >= 0)
+        int threshold = settings.PercussiveMode ? 5 : settings.SilenceThreshold;
+
+        if (_silenceCounter >= threshold && _lastMidiNote >= 0)
         {
             _midiOutput?.NoteOff();
             _midiOutput?.ResetPitchBend();
-            _virtualMidiPort?.AllNotesOff(Settings.MidiChannel);
+            _virtualMidiPort?.AllNotesOff(settings.MidiChannel);
 
             int oldNote = _lastMidiNote;
             _lastMidiNote = -1;
@@ -244,6 +395,25 @@ public sealed class PitchToMidiProcessor : IDisposable
             _smoothedFrequency = 0;
 
             MidiNoteChanged?.Invoke(this, new MidiNoteEventArgs(oldNote, -1, 0));
+        }
+    }
+
+    private void RaiseSpectrumIfDue(bool silent)
+    {
+        if (SpectrumUpdated == null) return;
+
+        long now = Environment.TickCount64;
+        if (now - _lastSpectrumTicks < 33) return; // ~30 fps
+        _lastSpectrumTicks = now;
+
+        if (silent)
+        {
+            SpectrumUpdated.Invoke(this, new SpectrumEventArgs(_zeroBins));
+        }
+        else
+        {
+            _onsetDetector.CopyMagnitudesTo(_spectrumBins);
+            SpectrumUpdated.Invoke(this, new SpectrumEventArgs((float[])_spectrumBins.Clone()));
         }
     }
 
@@ -264,19 +434,19 @@ public sealed class PitchToMidiProcessor : IDisposable
 
     public void Reset()
     {
-        lock (_lock)
-        {
-            _audioBuffer.Clear();
-            _pitchDetector.Reset();
-            _lastMidiNote = -1;
-            _candidateNote = -1;
-            _noteHoldCounter = 0;
-            _silenceCounter = 0;
-            _smoothedFrequency = 0;
+        _audioBuffer.Clear();
+        _pitchDetector.Reset();
+        _onsetDetector.Reset();
+        _lastMidiNote = -1;
+        _candidateNote = -1;
+        _noteHoldCounter = 0;
+        _silenceCounter = 0;
+        _smoothedFrequency = 0;
+        _pendingOnset = false;
+        _onsetAge = 0;
 
-            _midiOutput?.AllNotesOff();
-            _virtualMidiPort?.AllNotesOff(Settings.MidiChannel);
-        }
+        _midiOutput?.AllNotesOff();
+        _virtualMidiPort?.AllNotesOff(Settings.MidiChannel);
     }
 
     public void Dispose()
@@ -284,7 +454,9 @@ public sealed class PitchToMidiProcessor : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        Stop();
         Reset();
+        _dataReady.Dispose();
         _midiOutput?.Dispose();
         _virtualMidiPort?.Dispose();
     }
@@ -303,6 +475,7 @@ public class ProcessorSettings
     public bool SendPitchBend { get; set; } = true;
     public float VelocitySensitivity { get; set; } = 1.0f;
     public int MidiChannel { get; set; } = 0;
+    public bool PercussiveMode { get; set; }
 }
 
 public class PitchEventArgs : EventArgs
@@ -335,92 +508,12 @@ public class MidiNoteEventArgs : EventArgs
     }
 }
 
-internal class RingBuffer
+public class SpectrumEventArgs : EventArgs
 {
-    private readonly float[] _buffer;
-    private int _writePos;
-    private int _readPos;
-    private int _available;
-    private readonly object _lock = new();
+    public float[] Bins { get; }
 
-    public int Available
+    public SpectrumEventArgs(float[] bins)
     {
-        get { lock (_lock) return _available; }
-    }
-
-    public RingBuffer(int capacity)
-    {
-        _buffer = new float[capacity];
-    }
-
-    public void Write(ReadOnlySpan<float> data)
-    {
-        lock (_lock)
-        {
-            foreach (float sample in data)
-            {
-                _buffer[_writePos] = sample;
-                _writePos = (_writePos + 1) % _buffer.Length;
-
-                if (_available < _buffer.Length)
-                    _available++;
-                else
-                    _readPos = (_readPos + 1) % _buffer.Length; // Overwrite oldest
-            }
-        }
-    }
-
-    public void Read(Span<float> destination)
-    {
-        lock (_lock)
-        {
-            int toRead = Math.Min(destination.Length, _available);
-            for (int i = 0; i < toRead; i++)
-            {
-                destination[i] = _buffer[_readPos];
-                _readPos = (_readPos + 1) % _buffer.Length;
-            }
-            _available -= toRead;
-        }
-    }
-
-    /// <summary>
-    /// Copy samples without consuming them (non-destructive read).
-    /// </summary>
-    public void Peek(Span<float> destination)
-    {
-        lock (_lock)
-        {
-            int toPeek = Math.Min(destination.Length, _available);
-            int pos = _readPos;
-            for (int i = 0; i < toPeek; i++)
-            {
-                destination[i] = _buffer[pos];
-                pos = (pos + 1) % _buffer.Length;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Discard a number of samples from the read position (advance the window by hop size).
-    /// </summary>
-    public void Advance(int count)
-    {
-        lock (_lock)
-        {
-            int toAdvance = Math.Min(count, _available);
-            _readPos = (_readPos + toAdvance) % _buffer.Length;
-            _available -= toAdvance;
-        }
-    }
-
-    public void Clear()
-    {
-        lock (_lock)
-        {
-            _writePos = 0;
-            _readPos = 0;
-            _available = 0;
-        }
+        Bins = bins;
     }
 }

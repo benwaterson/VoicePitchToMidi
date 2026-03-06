@@ -9,7 +9,8 @@ Real-time voice pitch detection and MIDI conversion for Windows. Captures audio 
 - **Multiple audio backends**: WASAPI (shared and exclusive mode) and ASIO
 - **VST3 plugin** for use inside DAWs
 - **Configurable parameters**: noise gate, confidence threshold, smoothing, note stability, note range, pitch bend, velocity sensitivity, MIDI channel
-- **Dark-themed modern UI** with real-time note display, frequency readout, and confidence meter
+- **FFT spectrum visualization** showing real-time frequency content from the onset detector
+- **Dark-themed modern UI** with real-time note display, frequency readout, confidence meter, and spectrum display
 
 ## Architecture
 
@@ -29,12 +30,15 @@ src/
 │   │   ├── PitchAlgorithm.cs        # Algorithm enum + factory
 │   │   ├── YinPitchDetector.cs      # YIN algorithm (AVX2 optimized)
 │   │   ├── McLeodPitchDetector.cs   # McLeod Pitch Method (MPM/NSDF)
-│   │   └── AutocorrelationPitchDetector.cs
+│   │   ├── AutocorrelationPitchDetector.cs
+│   │   └── OnsetDetector.cs         # 256-point FFT onset + spectrum data
+│   ├── SpscRingBuffer.cs            # Lock-free single-producer/consumer buffer
 │   └── PitchToMidiProcessor.cs      # Main processing pipeline
 │
 ├── VoicePitchToMidi.Standalone/     # WPF standalone application (.NET 10)
 │   ├── MainWindow.xaml              # UI layout
 │   ├── MainViewModel.cs             # MVVM view model
+│   ├── SpectrumDisplay.cs           # FFT spectrum bar visualizer
 │   ├── AppSettings.cs               # JSON settings persistence
 │   └── App.xaml                     # Dark theme resources
 │
@@ -50,6 +54,7 @@ Microphone → Audio Backend (WASAPI/ASIO)
     → Ring Buffer (8192 samples, circular)
     → Overlapping Windows (2048 samples, 512-sample hop = 75% overlap)
     → Noise Gate (RMS threshold)
+    → Onset Detector (256-point FFT → spectrum display at ~30fps)
     → Pitch Detector (YIN / McLeod / Autocorrelation)
     → Confidence Filter
     → Frequency Smoothing (exponential moving average)
